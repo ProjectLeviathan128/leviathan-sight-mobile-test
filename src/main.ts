@@ -120,7 +120,7 @@ async function init() {
   }
 
   // Inference (YOLO blow detection)
-  await inference.init('yolo11n-blow.onnx');
+  await inference.init('best.onnx');
   if (inference.useMock) {
     zoneA.model.textContent = '● MOCK';
     zoneA.model.style.color = '#ffc107';
