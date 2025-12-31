@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="./vite.svg" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Leviathan Mobile Blow Detector</title>
+  <script type="module" crossorigin src="./assets/index-DjfKsgrS.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-D9klpMfy.css">
+</head>
+
+<body>
+  <div id="app">
+    <!-- Camera Feed Background -->
+    <div id="camera-container"></div>
+
+    <!-- Zone A: Status Strip -->
+    <div id="zone-a">
+      <div class="status-group">
+        <div class="status-item" id="status-model">● LOAD</div>
+        <div class="status-item" id="status-fps">-- FPS</div>
+      </div>
+      <div class="status-group">
+        <div class="status-item large" id="status-heading">---°</div>
+        <div class="status-item" id="status-zoom">1.0x</div>
+      </div>
+    </div>
+
+    <!-- Zone B: Detection Overlay -->
+    <div id="zone-b">
+      <canvas id="detection-canvas"></canvas>
+    </div>
+
+    <!-- Zone C: Action Bar -->
+    <div id="zone-c">
+      <!-- Zoom Toggles -->
+      <div class="zoom-controls">
+        <button id="btn-zoom-1">1x</button>
+        <button id="btn-zoom-4">4x</button>
+      </div>
+
+      <button id="btn-record">REC</button>
+    </div>
+
+    <!-- Debug Overlay -->
+    <div id="debug-overlay">
+      <h3>DEBUG PANEL (Swipe Down to Close)</h3>
+      <pre id="debug-stats">Initializing...</pre>
+    </div>
+  </div>
+
+</body>
+
+</html>
