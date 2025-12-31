@@ -8,6 +8,7 @@
 
 import type { HorizonLine, HorizonResult, IntrinsicMatrix } from '../core/types';
 import { DEG_TO_RAD, EARTH_RADIUS_M, REFRACTION_COEFFICIENT, RAD_TO_DEG } from '../core/types';
+import { createCanvas2D, type Canvas2DContext } from '../core/canvas2d';
 
 // ============================================================================
 // Configuration
@@ -49,20 +50,15 @@ const DEFAULT_CONFIG: HorizonConfig = {
 
 export class HorizonDetector {
     private config: HorizonConfig;
-    private coarseCanvas: OffscreenCanvas;
-    private coarseCtx: OffscreenCanvasRenderingContext2D;
-    private tempCanvas: OffscreenCanvas;
-    private tempCtx: OffscreenCanvasRenderingContext2D;
+    private coarseCanvasCtx: Canvas2DContext;
+    private tempCanvasCtx: Canvas2DContext;
 
     constructor(config: Partial<HorizonConfig> = {}) {
         this.config = { ...DEFAULT_CONFIG, ...config };
 
-        // Pre-allocate canvases for processing
-        this.coarseCanvas = new OffscreenCanvas(this.config.coarseSize, this.config.coarseSize);
-        this.coarseCtx = this.coarseCanvas.getContext('2d', { willReadFrequently: true })!;
-
-        this.tempCanvas = new OffscreenCanvas(640, 480);
-        this.tempCtx = this.tempCanvas.getContext('2d', { willReadFrequently: true })!;
+        // Pre-allocate canvases for processing (using safe factory for iOS compatibility)
+        this.coarseCanvasCtx = createCanvas2D(this.config.coarseSize, this.config.coarseSize, { willReadFrequently: true });
+        this.tempCanvasCtx = createCanvas2D(640, 480, { willReadFrequently: true });
     }
 
     /**
@@ -154,11 +150,17 @@ export class HorizonDetector {
         const workingWidth = Math.min(640, width);
         const workingHeight = Math.round(workingWidth * (height / width));
 
-        this.tempCanvas.width = workingWidth;
-        this.tempCanvas.height = workingHeight;
+        const tempCanvas = this.tempCanvasCtx.canvas;
+        const tempCtx = this.tempCanvasCtx.ctx;
 
-        this.tempCtx.drawImage(source, 0, 0, workingWidth, workingHeight);
-        return this.tempCtx.getImageData(0, 0, workingWidth, workingHeight);
+        // Resize canvas if needed
+        if (tempCanvas.width !== workingWidth || tempCanvas.height !== workingHeight) {
+            tempCanvas.width = workingWidth;
+            tempCanvas.height = workingHeight;
+        }
+
+        tempCtx.drawImage(source, 0, 0, workingWidth, workingHeight);
+        return tempCtx.getImageData(0, 0, workingWidth, workingHeight);
     }
 
     /**
@@ -198,14 +200,16 @@ export class HorizonDetector {
      */
     private downsample(imageData: ImageData): ImageData {
         const size = this.config.coarseSize;
-        this.coarseCanvas.width = size;
-        this.coarseCanvas.height = size;
+        const coarseCanvas = this.coarseCanvasCtx.canvas;
+        const _coarseCtx = this.coarseCanvasCtx.ctx;
 
-        // Draw scaled down
-        this.coarseCtx.drawImage(
-            this.createImageBitmap(imageData) as any, // Fallback without bitmap
-            0, 0, size, size
-        );
+        // Resize canvas if needed
+        if (coarseCanvas.width !== size || coarseCanvas.height !== size) {
+            coarseCanvas.width = size;
+            coarseCanvas.height = size;
+        }
+
+        // Note: drawImage with ImageBitmap doesn't work well, using manual scaling below
 
         // Fallback: use putImageData with manual scaling
         const scaleX = imageData.width / size;

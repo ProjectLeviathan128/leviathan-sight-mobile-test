@@ -6,6 +6,7 @@
  */
 
 import type { IntrinsicMatrix, Vector2 } from '../core/types';
+import { createCanvas2D, type Canvas2DContext } from '../core/canvas2d';
 
 // ============================================================================
 // Configuration
@@ -54,13 +55,12 @@ export interface SunDetection {
 
 export class SunTracker {
     private config: SunTrackerConfig;
-    private tempCanvas: OffscreenCanvas;
-    private tempCtx: OffscreenCanvasRenderingContext2D;
+    private tempCanvasCtx: Canvas2DContext;
 
     constructor(config: Partial<SunTrackerConfig> = {}) {
         this.config = { ...DEFAULT_CONFIG, ...config };
-        this.tempCanvas = new OffscreenCanvas(320, 240);
-        this.tempCtx = this.tempCanvas.getContext('2d', { willReadFrequently: true })!;
+        // Use safe canvas factory for iOS compatibility
+        this.tempCanvasCtx = createCanvas2D(320, 240, { willReadFrequently: true });
     }
 
     /**
@@ -147,11 +147,17 @@ export class SunTracker {
         const workingWidth = Math.min(320, width);
         const workingHeight = Math.round(workingWidth * (height / width));
 
-        this.tempCanvas.width = workingWidth;
-        this.tempCanvas.height = workingHeight;
+        const tempCanvas = this.tempCanvasCtx.canvas;
+        const tempCtx = this.tempCanvasCtx.ctx;
 
-        this.tempCtx.drawImage(source, 0, 0, workingWidth, workingHeight);
-        return this.tempCtx.getImageData(0, 0, workingWidth, workingHeight);
+        // Resize if needed
+        if (tempCanvas.width !== workingWidth || tempCanvas.height !== workingHeight) {
+            tempCanvas.width = workingWidth;
+            tempCanvas.height = workingHeight;
+        }
+
+        tempCtx.drawImage(source, 0, 0, workingWidth, workingHeight);
+        return tempCtx.getImageData(0, 0, workingWidth, workingHeight);
     }
 
     private findBrightPixels(imageData: ImageData): Vector2[] {

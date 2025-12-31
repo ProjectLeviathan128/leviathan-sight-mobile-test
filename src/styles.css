@@ -193,3 +193,173 @@ button.active {
 #debug-overlay.visible {
   transform: translateY(0);
 }
+
+/* Health Status Overlay */
+#health-overlay {
+  position: absolute;
+  top: 80px;
+  left: 8px;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: #e0f7fa;
+  font-family: monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  pointer-events: none;
+  max-width: 180px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+#ios-sensor-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 150;
+  padding: 20px 40px;
+  font-size: 18px;
+  font-weight: 600;
+  background: rgba(0, 188, 212, 0.9);
+  border: 2px solid #00bcd4;
+  color: #000;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 188, 212, 0.4);
+}
+
+/* =========================================================================
+   Diagnostics Panel Styles
+   ========================================================================= */
+
+.diag-panel {
+  position: fixed;
+  top: 80px;
+  right: 8px;
+  z-index: 300;
+  font-family: monospace;
+  font-size: 11px;
+  color: #e0f7fa;
+}
+
+.diag-panel.collapsed .diag-content {
+  display: none;
+}
+
+.diag-panel.expanded .diag-content {
+  display: block;
+}
+
+.diag-toggle {
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+  padding: 0;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  cursor: pointer;
+  display: block;
+  margin-left: auto;
+}
+
+.diag-content {
+  margin-top: 8px;
+  background: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 12px;
+  max-width: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.diag-status {
+  margin-bottom: 12px;
+}
+
+.diag-status-line {
+  font-weight: bold;
+  margin-bottom: 8px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+.diag-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.diag-table td {
+  padding: 2px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.diag-table td:first-child {
+  color: #888;
+  white-space: nowrap;
+}
+
+.diag-table td:last-child {
+  word-break: break-all;
+}
+
+.diag-mono {
+  font-family: monospace;
+  font-size: 9px;
+}
+
+.diag-warn {
+  color: #ffc107;
+}
+
+.diag-warning {
+  margin-top: 8px;
+  padding: 6px;
+  background: rgba(255, 193, 7, 0.2);
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  color: #ffc107;
+  font-size: 10px;
+}
+
+.diag-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.diag-buttons button {
+  flex: 1 1 45%;
+  padding: 8px 6px;
+  font-size: 11px;
+  background: rgba(0, 188, 212, 0.2);
+  border: 1px solid rgba(0, 188, 212, 0.5);
+  color: #00bcd4;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.diag-buttons button:active {
+  background: rgba(0, 188, 212, 0.4);
+  transform: scale(0.97);
+}
+
+.diag-test-canvas {
+  width: 100%;
+  max-width: 300px;
+  height: auto;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  background: #111;
+  display: block;
+  margin-top: 8px;
+}

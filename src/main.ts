@@ -22,7 +22,73 @@ import { HeaveCompensator } from './fusion/wave-filter';
 import { VisualCompass } from './nav/compass';
 import { HUDRenderer } from './ui/hud';
 
+// Diagnostics
+import { DiagnosticsPanel } from './diagnostics/DiagnosticsPanel';
+
 import type { HorizonLine, Orientation, HeadingEstimate, AttitudeState } from './core/types';
+
+// ============================================================================
+// Health Status Tracking (must be before any other code that might crash)
+// ============================================================================
+
+interface HealthState {
+  fatalError: string | null;
+  secureContext: boolean;
+  camera: 'uninitialized' | 'requesting' | 'granted' | 'denied' | 'error';
+  sensors: 'unknown' | 'ios-needs-tap' | 'granted' | 'denied';
+  model: 'loading' | 'loaded' | 'mock' | 'error';
+  lastHeartbeat: number;
+}
+
+const healthState: HealthState = {
+  fatalError: null,
+  secureContext: typeof window !== 'undefined' && window.isSecureContext,
+  camera: 'uninitialized',
+  sensors: 'unknown',
+  model: 'loading',
+  lastHeartbeat: Date.now(),
+};
+
+// Global error handlers - catch any uncaught errors
+window.addEventListener('error', (event) => {
+  const msg = `${event.message} at ${event.filename}:${event.lineno}`;
+  healthState.fatalError = msg.substring(0, 200);
+  console.error('[Health] Uncaught error:', msg);
+  updateHealthOverlay();
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const msg = `Promise rejected: ${event.reason}`;
+  healthState.fatalError = msg.substring(0, 200);
+  console.error('[Health] Unhandled rejection:', event.reason);
+  updateHealthOverlay();
+});
+
+// Health overlay update function
+function updateHealthOverlay() {
+  const overlay = document.getElementById('health-overlay');
+  if (!overlay) return;
+
+  const now = Date.now();
+  const heartbeatAge = now - healthState.lastHeartbeat;
+
+  overlay.innerHTML = `
+    <div style="font-size:10px;line-height:1.4;">
+      ${healthState.fatalError ? `<div style="color:#ff5252;">⚠️ ${healthState.fatalError}</div>` : ''}
+      <div>secure: ${healthState.secureContext ? '✓' : '✗'}</div>
+      <div>camera: ${healthState.camera}</div>
+      <div>sensors: ${healthState.sensors}</div>
+      <div>model: ${healthState.model}</div>
+      <div>heartbeat: ${heartbeatAge > 1000 ? '⚠️ ' + heartbeatAge + 'ms' : '✓'}</div>
+    </div>
+  `;
+}
+
+// Check if iOS and needs user gesture for sensors
+function checkIOSSensorPermission(): boolean {
+  return typeof (DeviceOrientationEvent as any).requestPermission === 'function' ||
+    typeof (DeviceMotionEvent as any).requestPermission === 'function';
+}
 
 // ============================================================================
 // DOM Elements
@@ -45,9 +111,10 @@ const debugStats = document.getElementById('debug-stats')!;
 const debugOverlay = document.getElementById('debug-overlay')!;
 const canvas = document.getElementById('detection-canvas') as HTMLCanvasElement;
 const container = document.getElementById('camera-container')!;
+const iosSensorBtn = document.getElementById('ios-sensor-btn') as HTMLButtonElement;
 
 // ============================================================================
-// Module Instances
+// Module Instances (wrapped to catch initialization errors)
 // ============================================================================
 
 // Core modules
@@ -61,13 +128,30 @@ const recorder = new Recorder();
 const sensors = new SensorManager();
 const intrinsics = new IntrinsicsManager();
 
-// Leviathan Systems modules
-const horizonDetector = new HorizonDetector();
-const attitudeEKF = new AttitudeEKF();
-const heaveComp = new HeaveCompensator(3.0); // 3m nominal observer height
-const visualCompass = new VisualCompass();
-const hudRenderer = new HUDRenderer(canvas);
-const blowLocalizer = new BlowLocalizer();
+// Leviathan Systems modules - these use canvas, so initialization may fail on iOS
+let horizonDetector: HorizonDetector | null = null;
+let attitudeEKF: AttitudeEKF;
+let heaveComp: HeaveCompensator;
+let visualCompass: VisualCompass;
+let hudRenderer: HUDRenderer;
+let blowLocalizer: BlowLocalizer;
+
+try {
+  horizonDetector = new HorizonDetector();
+  attitudeEKF = new AttitudeEKF();
+  heaveComp = new HeaveCompensator(3.0); // 3m nominal observer height
+  visualCompass = new VisualCompass();
+  hudRenderer = new HUDRenderer(canvas);
+  blowLocalizer = new BlowLocalizer();
+} catch (e) {
+  console.error('[Leviathan] Module init error:', e);
+  healthState.fatalError = `Module init: ${e}`.substring(0, 200);
+  updateHealthOverlay();
+}
+
+// Diagnostics panel - always created (works even if other modules fail)
+const diagnosticsPanel = new DiagnosticsPanel(inference);
+diagnosticsPanel.mount();
 
 // ============================================================================
 // State Variables
@@ -101,43 +185,76 @@ const EKF_MIN_INTERVAL_MS = 10;   // 100 Hz max for EKF
 
 async function init() {
   appState.state = AppState.LOADING;
+  updateHealthOverlay();
+
+  // Check secure context
+  if (!healthState.secureContext) {
+    console.warn('[Leviathan] Not a secure context - some features may be blocked');
+  }
 
   // Camera
+  healthState.camera = 'requesting';
+  updateHealthOverlay();
   try {
     camera.mount(container);
     await camera.start();
+    healthState.camera = 'granted';
 
     // Update intrinsics for actual video resolution
     const videoEl = camera.videoElement;
     if (videoEl.videoWidth > 0) {
       intrinsics.updateForResolution(videoEl.videoWidth, videoEl.videoHeight);
     }
+    // Connect video to diagnostics panel for live camera test
+    diagnosticsPanel.setVideoElement(videoEl);
   } catch (e) {
     console.error('Camera init failed:', e);
+    healthState.camera = 'error';
     zoneA.model.textContent = '● CAM ERROR';
     zoneA.model.style.color = '#ff5252';
+    updateHealthOverlay();
     return;
   }
 
   // Inference (YOLO blow detection)
   await inference.init('best.onnx');
   if (inference.useMock) {
+    healthState.model = 'mock';
     zoneA.model.textContent = '● MOCK';
     zoneA.model.style.color = '#ffc107';
   } else {
+    healthState.model = 'loaded';
     zoneA.model.textContent = '● LOADED';
     zoneA.model.style.color = '#4caf50';
   }
+  updateHealthOverlay();
 
-  // Sensors
-  await sensors.requestPermission();
-  document.body.addEventListener('click', () => {
-    if (!sensors.permissionGranted) sensors.requestPermission();
-  }, { once: true });
+  // Sensors - check if iOS needs user gesture
+  if (checkIOSSensorPermission()) {
+    healthState.sensors = 'ios-needs-tap';
+    iosSensorBtn.style.display = 'block';
+    iosSensorBtn.addEventListener('click', async () => {
+      const granted = await sensors.requestPermission();
+      healthState.sensors = granted ? 'granted' : 'denied';
+      if (granted) {
+        iosSensorBtn.style.display = 'none';
+        const imu = sensors.getLatestIMU();
+        if (imu && attitudeEKF) {
+          attitudeEKF.initializeFromAccel(imu.accelWithGravity, Date.now());
+        }
+      }
+      updateHealthOverlay();
+    });
+  } else {
+    // Non-iOS: auto-request
+    const granted = await sensors.requestPermission();
+    healthState.sensors = granted ? 'granted' : 'denied';
+  }
+  updateHealthOverlay();
 
   // Initialize EKF from accelerometer if available
   const imu = sensors.getLatestIMU();
-  if (imu) {
+  if (imu && attitudeEKF) {
     attitudeEKF.initializeFromAccel(imu.accelWithGravity, Date.now());
   }
 
@@ -196,7 +313,10 @@ async function loop() {
   const now = Date.now();
   frameCount++;
 
-  // FPS counter
+  // Update heartbeat for health monitoring
+  healthState.lastHeartbeat = now;
+
+  // FPS counter + periodic health overlay update
   if (now - lastFpsTime >= 1000) {
     zoneA.fps.textContent = `${frameCount} FPS`;
     frameCount = 0;
@@ -229,26 +349,30 @@ async function loop() {
   // HORIZON DETECTION (Throttled)
   // ========================================================================
 
-  if (now - lastHorizonTime >= HORIZON_INTERVAL_MS) {
+  if (horizonDetector && now - lastHorizonTime >= HORIZON_INTERVAL_MS) {
     const result = horizonDetector.detect(
       camera.videoElement,
       K,
-      heaveComp.getStableHeight()
+      heaveComp?.getStableHeight() ?? 3.0
     );
 
     if (result.horizon) {
       currentHorizon = result.horizon;
 
       // Update EKF with horizon measurement
-      attitudeEKF.updateWithHorizon(result.horizon.roll, result.horizon.pitch);
+      if (attitudeEKF) {
+        attitudeEKF.updateWithHorizon(result.horizon.roll, result.horizon.pitch);
+      }
     }
 
     lastHorizonTime = now;
   }
 
   // Get fused orientation from EKF
-  currentAttitudeState = attitudeEKF.getState();
-  currentOrientation = currentAttitudeState.orientation;
+  if (attitudeEKF) {
+    currentAttitudeState = attitudeEKF.getState();
+    currentOrientation = currentAttitudeState.orientation;
+  }
 
   // ========================================================================
   // HEADING ESTIMATION

@@ -47,10 +47,16 @@
       <h3>DEBUG PANEL (Swipe Down to Close)</h3>
       <pre id="debug-stats">Initializing...</pre>
     </div>
+
+    <!-- Health Status Overlay (top-left, always visible for debugging) -->
+    <div id="health-overlay"></div>
+
+    <!-- iOS Sensor Permission Button (shown only on iOS when needed) -->
+    <button id="ios-sensor-btn" style="display:none;">Tap to Enable Sensors</button>
   </div>
 
+  <link rel="stylesheet" href="/src/styles.css">
   <script type="module" src="/src/main.ts"></script>
-  <script type="module" src="/src/styles.css"></script>
 </body>
 
 </html>

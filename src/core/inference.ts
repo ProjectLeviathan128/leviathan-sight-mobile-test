@@ -8,6 +8,20 @@
 
 import * as ort from 'onnxruntime-web';
 import { mobileLogger } from '../ui/logger';
+import { createCanvas2D, type Canvas2DContext } from './canvas2d';
+import {
+    isIOS,
+    computeSha256,
+    fetchModelBuffer,
+    resolveModelUrl,
+    describeOrtSession,
+    checkOutputsFinite,
+    EXPECTED_MODEL_SHA256,
+    type ModelInitResult,
+    type SanityRunResult,
+    type SessionInfo,
+    type FetchResult,
+} from '../diagnostics/model_health';
 
 export interface Detection {
     x: number; // Normalized center x (0-1)
@@ -30,25 +44,57 @@ export class InferenceEngine {
     enabled: boolean = false;
     useMock: boolean = false;
 
-    // Preprocessing canvas
-    private canvas: OffscreenCanvas;
-    private ctx: OffscreenCanvasRenderingContext2D;
+    // Preprocessing canvas (lazy initialized)
+    private canvasContext: Canvas2DContext | null = null;
 
     // Mock state
     private lastMockUpdate = 0;
     private mockDetections: Detection[] = [];
 
+    // Diagnostics state
+    private _lastInferenceMs: number = 0;
+    private _lastInferenceTimestamp: number = 0;
+    private _backendUsed: string = 'unknown';
+    private _backendFallbackReason: string | null = null;
+    private _lastFetchResult: FetchResult | null = null;
+    private _modelSha256: string | null = null;
+
     constructor() {
+        // iOS-specific hardening: single-threaded WASM for reliability
+        if (isIOS()) {
+            ort.env.wasm.numThreads = 1;
+            console.log('[InferenceEngine] iOS detected - using single-threaded WASM');
+        }
+
         // Set WASM paths for ONNX Runtime
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
-
-        // Pre-allocate canvas for preprocessing
-        this.canvas = new OffscreenCanvas(640, 640);
-        this.ctx = this.canvas.getContext('2d', { willReadFrequently: true })!;
+        // Canvas is now lazily initialized in init() to avoid iOS OffscreenCanvas crash
     }
+
+    // =========================================================================
+    // Diagnostic Getters
+    // =========================================================================
+
+    get lastInferenceMs(): number { return this._lastInferenceMs; }
+    get lastInferenceTimestamp(): number { return this._lastInferenceTimestamp; }
+    get backendUsed(): string { return this._backendUsed; }
+    get backendFallbackReason(): string | null { return this._backendFallbackReason; }
+    get modelSha256(): string | null { return this._modelSha256; }
+    get lastFetchResult(): FetchResult | null { return this._lastFetchResult; }
+
+    getSessionInfo(): SessionInfo | null {
+        if (!this.session) return null;
+        return describeOrtSession(this.session);
+    }
+
 
     async init(modelPath: string = '/best.onnx') {
         try {
+            // Initialize canvas lazily (avoids iOS OffscreenCanvas crash at module load)
+            if (!this.canvasContext) {
+                this.canvasContext = createCanvas2D(640, 640, { willReadFrequently: true });
+            }
+
             mobileLogger.log(`[Leviathan] Loading YOLO ONNX model from ${modelPath}...`);
 
             // 1. Load Session
@@ -156,15 +202,21 @@ export class InferenceEngine {
         const padX = (width - newW) / 2;
         const padY = (height - newH) / 2;
 
+        // Ensure canvas is initialized
+        if (!this.canvasContext) {
+            throw new Error('[InferenceEngine] Canvas not initialized - call init() first');
+        }
+        const ctx = this.canvasContext.ctx;
+
         // Clear canvas with gray (letterbox color)
-        this.ctx.fillStyle = '#808080';
-        this.ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = '#808080';
+        ctx.fillRect(0, 0, width, height);
 
         // Draw scaled image centered
-        this.ctx.drawImage(source, padX, padY, newW, newH);
+        ctx.drawImage(source, padX, padY, newW, newH);
 
         // Get pixel data
-        const imageData = this.ctx.getImageData(0, 0, width, height);
+        const imageData = ctx.getImageData(0, 0, width, height);
         const pixels = imageData.data;
 
         // Convert to NCHW float32 [0, 1]
@@ -263,8 +315,8 @@ export class InferenceEngine {
             }
 
             if (maxScore > 0.1) {
-                 // Log potential candidates (even if below display threshold)
-                 // mobileLogger.log(`Raw candidate: ${maxScore.toFixed(2)}`);
+                // Log potential candidates (even if below display threshold)
+                // mobileLogger.log(`Raw candidate: ${maxScore.toFixed(2)}`);
             }
 
             if (maxScore < confThreshold) continue;
@@ -372,6 +424,204 @@ export class InferenceEngine {
         }
 
         return this.mockDetections.filter(d => d.confidence >= confThreshold);
+    }
+
+    // =========================================================================
+    // Enhanced Diagnostics Methods
+    // =========================================================================
+
+    /**
+     * Initialize model from URL with full diagnostics.
+     * This method provides detailed information about fetch, hash verification,
+     * and session creation for debugging iOS Safari issues.
+     */
+    async initFromUrl(url: string = '/best.onnx'): Promise<ModelInitResult> {
+        const startTime = performance.now();
+        const result: ModelInitResult = {
+            success: false,
+            fetchResult: null,
+            sha256: null,
+            hashMatch: false,
+            backend: 'unknown',
+            backendFallbackReason: null,
+            sessionInfo: null,
+            error: null,
+            durationMs: 0,
+        };
+
+        try {
+            // Initialize canvas lazily
+            if (!this.canvasContext) {
+                this.canvasContext = createCanvas2D(640, 640, { willReadFrequently: true });
+            }
+
+            // 1. Resolve and fetch model
+            const resolvedUrl = resolveModelUrl(url);
+            mobileLogger.log(`[Diagnostics] Fetching model from: ${resolvedUrl}`);
+
+            const fetchResult = await fetchModelBuffer(resolvedUrl);
+            result.fetchResult = fetchResult;
+            this._lastFetchResult = fetchResult;
+
+            if (!fetchResult.ok || !fetchResult.buffer) {
+                result.error = fetchResult.error || 'Fetch failed';
+                result.durationMs = performance.now() - startTime;
+                return result;
+            }
+
+            mobileLogger.log(`[Diagnostics] Fetched ${fetchResult.actualBytes} bytes`);
+
+            // 2. Compute SHA-256
+            const sha256 = await computeSha256(fetchResult.buffer);
+            result.sha256 = sha256;
+            this._modelSha256 = sha256;
+            result.hashMatch = sha256 === EXPECTED_MODEL_SHA256;
+
+            mobileLogger.log(`[Diagnostics] SHA-256: ${sha256.substring(0, 16)}...`);
+            mobileLogger.log(`[Diagnostics] Hash match: ${result.hashMatch}`);
+
+            // 3. Create session from buffer
+            const sessionOptions: ort.InferenceSession.SessionOptions = {
+                executionProviders: ['webgpu', 'wasm'],
+                graphOptimizationLevel: 'all',
+                logSeverityLevel: 0,
+            };
+
+            // Try WebGPU first, fall back to WASM
+            try {
+                this.session = await ort.InferenceSession.create(fetchResult.buffer, sessionOptions);
+
+                // Determine which backend was actually used
+                // Note: ORT-web doesn't expose which EP was used directly
+                // We infer from what's available
+                if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
+                    this._backendUsed = 'webgpu (attempted)';
+                } else {
+                    this._backendUsed = 'wasm';
+                }
+            } catch (webgpuError) {
+                // WebGPU failed, try WASM only
+                mobileLogger.log(`[Diagnostics] WebGPU failed, falling back to WASM`);
+                this._backendFallbackReason = String(webgpuError);
+                result.backendFallbackReason = this._backendFallbackReason;
+
+                const wasmOptions: ort.InferenceSession.SessionOptions = {
+                    executionProviders: ['wasm'],
+                    graphOptimizationLevel: 'all',
+                    logSeverityLevel: 0,
+                };
+
+                this.session = await ort.InferenceSession.create(fetchResult.buffer, wasmOptions);
+                this._backendUsed = 'wasm';
+            }
+
+            result.backend = this._backendUsed;
+
+            // 4. Extract session info
+            this.inputName = this.session.inputNames[0];
+            this.outputName = this.session.outputNames[0];
+            result.sessionInfo = describeOrtSession(this.session);
+
+            mobileLogger.log(`[Diagnostics] Session created. Backend: ${this._backendUsed}`);
+            mobileLogger.log(`[Diagnostics] Inputs: ${this.session.inputNames.join(', ')}`);
+            mobileLogger.log(`[Diagnostics] Outputs: ${this.session.outputNames.join(', ')}`);
+
+            this.enabled = true;
+            this.useMock = false;
+            result.success = true;
+
+        } catch (e) {
+            const err = e as Error;
+            result.error = `${err.name}: ${err.message}`;
+            mobileLogger.error(`[Diagnostics] Init failed: ${result.error}`);
+
+            // Fall back to mock mode
+            this.useMock = true;
+            this.enabled = true;
+        }
+
+        result.durationMs = performance.now() - startTime;
+        return result;
+    }
+
+    /**
+     * Run a sanity check with a dummy input tensor.
+     * Validates that inference runs and produces finite outputs.
+     */
+    async sanityRun(): Promise<SanityRunResult> {
+        const startTime = performance.now();
+        const result: SanityRunResult = {
+            success: false,
+            inputShape: this.inputShape,
+            outputShapes: [],
+            outputsFinite: false,
+            durationMs: 0,
+            error: null,
+        };
+
+        if (!this.session) {
+            result.error = 'Session not initialized';
+            result.durationMs = performance.now() - startTime;
+            return result;
+        }
+
+        try {
+            // Create dummy input (gray image)
+            const inputData = new Float32Array(this.inputShape.reduce((a, b) => a * b, 1));
+            inputData.fill(0.5); // Gray
+
+            const inputTensor = new ort.Tensor('float32', inputData, this.inputShape);
+            const feeds: Record<string, ort.Tensor> = {};
+            feeds[this.inputName] = inputTensor;
+
+            // Run inference
+            const inferenceStart = performance.now();
+            const results = await this.session.run(feeds);
+            this._lastInferenceMs = performance.now() - inferenceStart;
+            this._lastInferenceTimestamp = Date.now();
+
+            // Check outputs
+            for (const [name, tensor] of Object.entries(results)) {
+                result.outputShapes.push({
+                    name,
+                    dims: tensor.dims as number[],
+                });
+
+                // Check for finite values
+                const data = tensor.data as Float32Array;
+                result.outputsFinite = checkOutputsFinite(data);
+            }
+
+            result.success = true;
+            mobileLogger.log(`[Diagnostics] Sanity run: ${this._lastInferenceMs.toFixed(1)}ms`);
+
+        } catch (e) {
+            const err = e as Error;
+            result.error = `${err.name}: ${err.message}`;
+            mobileLogger.error(`[Diagnostics] Sanity run failed: ${result.error}`);
+        }
+
+        result.durationMs = performance.now() - startTime;
+        return result;
+    }
+
+    /**
+     * Run inference on a test image canvas and return detailed results.
+     * Uses the same pipeline as live inference for validation.
+     */
+    async runOnCanvas(
+        canvas: HTMLCanvasElement,
+        confThreshold: number = 0.25,
+        iouThreshold: number = 0.45
+    ): Promise<{ detections: Detection[]; inferenceMs: number }> {
+        const inferenceStart = performance.now();
+        const detections = await this.run(canvas, confThreshold, iouThreshold);
+        const inferenceMs = performance.now() - inferenceStart;
+
+        this._lastInferenceMs = inferenceMs;
+        this._lastInferenceTimestamp = Date.now();
+
+        return { detections, inferenceMs };
     }
 }
 

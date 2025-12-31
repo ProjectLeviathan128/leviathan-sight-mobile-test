@@ -48,28 +48,47 @@ export class SensorManager {
     }
 
     async requestPermission(): Promise<boolean> {
+        let orientationGranted = true;
+        let motionGranted = true;
+
         // iOS 13+ requires permission for DeviceOrientation
         if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
             try {
                 const response = await (DeviceOrientationEvent as any).requestPermission();
-                if (response === 'granted') {
-                    this.permissionGranted = true;
-                    this.start();
-                    return true;
-                } else {
-                    console.warn('Orientation permission denied');
-                    return false;
+                orientationGranted = response === 'granted';
+                if (!orientationGranted) {
+                    console.warn('[SensorManager] DeviceOrientation permission denied');
                 }
             } catch (e) {
-                console.error('Orientation permission error:', e);
-                return false;
+                console.error('[SensorManager] DeviceOrientation permission error:', e);
+                orientationGranted = false;
             }
-        } else {
-            // Non-iOS or older browsers
+        }
+
+        // iOS 13+ requires SEPARATE permission for DeviceMotion (gyro/accel)
+        // This is critical for EKF - without it, gyro data is blocked!
+        if (typeof (DeviceMotionEvent as any).requestPermission === 'function') {
+            try {
+                const response = await (DeviceMotionEvent as any).requestPermission();
+                motionGranted = response === 'granted';
+                if (!motionGranted) {
+                    console.warn('[SensorManager] DeviceMotion permission denied');
+                }
+            } catch (e) {
+                console.error('[SensorManager] DeviceMotion permission error:', e);
+                motionGranted = false;
+            }
+        }
+
+        // Only start if we have the permissions we need
+        if (orientationGranted && motionGranted) {
             this.permissionGranted = true;
             this.start();
             return true;
         }
+
+        console.warn('[SensorManager] Sensor permissions incomplete - orientation:', orientationGranted, 'motion:', motionGranted);
+        return false;
     }
 
     start() {
