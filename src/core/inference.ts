@@ -117,6 +117,17 @@ export class InferenceEngine {
                 iouThreshold
             );
 
+            // DEBUG LOGGING
+            const maxScore = detections.length > 0 ? detections[0].confidence : 0;
+            // sample input
+            const inputData = inputTensor.data as Float32Array;
+            const sampleInput = [inputData[0], inputData[100], inputData[1000]]; // Sample first few pixels
+
+            // Log every 60 frames (~1 sec) to verify inputs are non-zero and outputs are valid
+            if (Date.now() % 60 === 0 || detections.length > 0) {
+                mobileLogger.log(`Conf: ${maxScore.toFixed(2)} | Input[0]: ${sampleInput[0].toFixed(3)} | Dets: ${detections.length}`);
+            }
+
             return detections;
 
         } catch (e) {
@@ -249,6 +260,11 @@ export class InferenceEngine {
                     maxScore = classScores[c];
                     maxClassId = c;
                 }
+            }
+
+            if (maxScore > 0.1) {
+                 // Log potential candidates (even if below display threshold)
+                 // mobileLogger.log(`Raw candidate: ${maxScore.toFixed(2)}`);
             }
 
             if (maxScore < confThreshold) continue;
