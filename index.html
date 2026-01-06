@@ -7,7 +7,7 @@
   <meta name="viewport"
     content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Leviathan Mobile Blow Detector</title>
-  <script type="module" crossorigin src="./assets/index-BvPCQv4q.js"></script>
+  <script type="module" crossorigin src="./assets/index-XpXDol-Z.js"></script>
   <link rel="stylesheet" crossorigin href="./assets/index-Dbg0LI-M.css">
 </head>
 
@@ -28,10 +28,14 @@
       </div>
     </div>
 
-    <!-- Zone B: Detection Overlay -->
+    <!-- Zone B: Detection Overlay (YOLO boxes only - never cleared by HUD) -->
     <div id="zone-b">
       <canvas id="detection-canvas"></canvas>
+      <canvas id="hud-canvas"></canvas>
     </div>
+
+    <!-- Pipeline Status Panel (always visible observability) -->
+    <div id="pipeline-status-panel"></div>
 
     <!-- Zone C: Action Bar -->
     <div id="zone-c">
