@@ -26,10 +26,14 @@
       </div>
     </div>
 
-    <!-- Zone B: Detection Overlay -->
+    <!-- Zone B: Detection Overlay (YOLO boxes only - never cleared by HUD) -->
     <div id="zone-b">
       <canvas id="detection-canvas"></canvas>
+      <canvas id="hud-canvas"></canvas>
     </div>
+
+    <!-- Pipeline Status Panel (always visible observability) -->
+    <div id="pipeline-status-panel"></div>
 
     <!-- Zone C: Action Bar -->
     <div id="zone-c">

@@ -14,6 +14,7 @@ import { Recorder } from './core/recorder';
 import { SensorManager } from './core/sensors';
 import { IntrinsicsManager } from './core/intrinsics';
 import { BlowLocalizer, type BlowLocation } from './core/localization';
+import { clipRecorder } from './core/clip-recorder';
 
 // Leviathan Systems modules
 import { HorizonDetector } from './vision/horizon';
@@ -24,6 +25,27 @@ import { HUDRenderer } from './ui/hud';
 
 // Diagnostics
 import { DiagnosticsPanel } from './diagnostics/DiagnosticsPanel';
+
+// Pipeline Status (central status registry - nothing fails silently)
+import {
+  setActive,
+  setDegraded,
+  setFailed,
+  updateStatus,
+  pipelineStatus,
+  isOperational
+} from './core/pipeline-status';
+import { initStatusPanel } from './ui/status-panel';
+
+// Tests - exposed to window for browser console execution
+import { runPipelineTests } from './__tests__/pipeline.test';
+import { runE2ETest } from './__tests__/e2e.test';
+
+// Expose tests to window
+if (typeof window !== 'undefined') {
+  (window as any).runPipelineTests = runPipelineTests;
+  (window as any).runE2ETest = runE2ETest;
+}
 
 import type { HorizonLine, Orientation, HeadingEstimate, AttitudeState } from './core/types';
 
@@ -128,26 +150,78 @@ const recorder = new Recorder();
 const sensors = new SensorManager();
 const intrinsics = new IntrinsicsManager();
 
-// Leviathan Systems modules - these use canvas, so initialization may fail on iOS
-let horizonDetector: HorizonDetector | null = null;
-let attitudeEKF: AttitudeEKF;
-let heaveComp: HeaveCompensator;
-let visualCompass: VisualCompass;
-let hudRenderer: HUDRenderer;
-let blowLocalizer: BlowLocalizer;
+// Get HUD canvas (separate from detection canvas to prevent clearing)
+const hudCanvas = document.getElementById('hud-canvas') as HTMLCanvasElement;
+if (!hudCanvas) {
+  console.warn('[Main] HUD canvas not found, will use detection canvas');
+}
 
+// Leviathan Systems modules - each initialized separately to prevent cascade failures
+// Each reports its status to the pipeline status system
+let horizonDetector: HorizonDetector | null = null;
+let attitudeEKF: AttitudeEKF | null = null;
+let heaveComp: HeaveCompensator | null = null;
+let visualCompass: VisualCompass | null = null;
+let hudRenderer: HUDRenderer | null = null;
+let blowLocalizer: BlowLocalizer | null = null;
+
+// Initialize HorizonDetector
 try {
   horizonDetector = new HorizonDetector();
-  attitudeEKF = new AttitudeEKF();
-  heaveComp = new HeaveCompensator(3.0); // 3m nominal observer height
-  visualCompass = new VisualCompass();
-  hudRenderer = new HUDRenderer(canvas);
-  blowLocalizer = new BlowLocalizer();
+  updateStatus('horizon', 'initializing', 'Waiting for video ready');
+  console.log('[Leviathan] HorizonDetector initialized');
 } catch (e) {
-  console.error('[Leviathan] Module init error:', e);
-  healthState.fatalError = `Module init: ${e}`.substring(0, 200);
-  updateHealthOverlay();
+  setFailed('horizon', `Init failed: ${e}`);
+  console.error('[Leviathan] HorizonDetector init failed:', e);
 }
+
+// Initialize AttitudeEKF
+try {
+  attitudeEKF = new AttitudeEKF();
+  updateStatus('ekf', 'initializing', 'Waiting for IMU data');
+  console.log('[Leviathan] AttitudeEKF initialized');
+} catch (e) {
+  setFailed('ekf', `Init failed: ${e}`);
+  console.error('[Leviathan] AttitudeEKF init failed:', e);
+}
+
+// Initialize HeaveCompensator
+try {
+  heaveComp = new HeaveCompensator(3.0); // 3m nominal observer height
+  console.log('[Leviathan] HeaveCompensator initialized');
+} catch (e) {
+  console.error('[Leviathan] HeaveCompensator init failed:', e);
+}
+
+// Initialize VisualCompass
+try {
+  visualCompass = new VisualCompass();
+  updateStatus('heading', 'initializing', 'Waiting for GPS location');
+  console.log('[Leviathan] VisualCompass initialized');
+} catch (e) {
+  setFailed('heading', `Init failed: ${e}`);
+  console.error('[Leviathan] VisualCompass init failed:', e);
+}
+
+// Initialize HUDRenderer - use separate HUD canvas if available
+try {
+  hudRenderer = new HUDRenderer(hudCanvas || canvas);
+  console.log('[Leviathan] HUDRenderer initialized');
+} catch (e) {
+  console.error('[Leviathan] HUDRenderer init failed:', e);
+}
+
+// Initialize BlowLocalizer
+try {
+  blowLocalizer = new BlowLocalizer();
+  updateStatus('localization', 'initializing', 'Waiting for heading data');
+  console.log('[Leviathan] BlowLocalizer initialized');
+} catch (e) {
+  setFailed('localization', `Init failed: ${e}`);
+  console.error('[Leviathan] BlowLocalizer init failed:', e);
+}
+
+updateHealthOverlay();
 
 // Diagnostics panel - always created (works even if other modules fail)
 const diagnosticsPanel = new DiagnosticsPanel(inference);
@@ -187,6 +261,9 @@ async function init() {
   appState.state = AppState.LOADING;
   updateHealthOverlay();
 
+  // Initialize status panel for real-time observability
+  initStatusPanel({ detailed: true, position: 'top-left' });
+
   // Check secure context
   if (!healthState.secureContext) {
     console.warn('[Leviathan] Not a secure context - some features may be blocked');
@@ -194,22 +271,42 @@ async function init() {
 
   // Camera
   healthState.camera = 'requesting';
+  updateStatus('camera', 'initializing', 'Requesting access');
   updateHealthOverlay();
   try {
     camera.mount(container);
     await camera.start();
     healthState.camera = 'granted';
+    setActive('camera', 'Camera active');
 
     // Update intrinsics for actual video resolution
     const videoEl = camera.videoElement;
     if (videoEl.videoWidth > 0) {
       intrinsics.updateForResolution(videoEl.videoWidth, videoEl.videoHeight);
+    } else {
+      // Video not ready yet - wait for metadata
+      await new Promise<void>((resolve) => {
+        videoEl.addEventListener('loadedmetadata', () => {
+          intrinsics.updateForResolution(videoEl.videoWidth, videoEl.videoHeight);
+          resolve();
+        }, { once: true });
+        // Timeout fallback
+        setTimeout(resolve, 2000);
+      });
     }
+
     // Connect video to diagnostics panel for live camera test
     diagnosticsPanel.setVideoElement(videoEl);
+
+    // Initialize clip recorder with camera stream for pre-roll buffer
+    const stream = (videoEl as any).srcObject as MediaStream;
+    if (stream) {
+      clipRecorder.init(stream);
+    }
   } catch (e) {
     console.error('Camera init failed:', e);
     healthState.camera = 'error';
+    setFailed('camera', `Access denied or error: ${e}`);
     zoneA.model.textContent = '● CAM ERROR';
     zoneA.model.style.color = '#ff5252';
     updateHealthOverlay();
@@ -217,13 +314,16 @@ async function init() {
   }
 
   // Inference (YOLO blow detection)
+  updateStatus('inference', 'initializing', 'Loading model...');
   await inference.init('best.onnx');
   if (inference.useMock) {
     healthState.model = 'mock';
+    setDegraded('inference', 'Using mock mode (no real model)');
     zoneA.model.textContent = '● MOCK';
     zoneA.model.style.color = '#ffc107';
   } else {
     healthState.model = 'loaded';
+    setActive('inference', 'Model loaded');
     zoneA.model.textContent = '● LOADED';
     zoneA.model.style.color = '#4caf50';
   }
@@ -232,16 +332,21 @@ async function init() {
   // Sensors - check if iOS needs user gesture
   if (checkIOSSensorPermission()) {
     healthState.sensors = 'ios-needs-tap';
+    updateStatus('sensors', 'initializing', 'iOS requires tap - tap button to enable');
     iosSensorBtn.style.display = 'block';
     iosSensorBtn.addEventListener('click', async () => {
       const granted = await sensors.requestPermission();
       healthState.sensors = granted ? 'granted' : 'denied';
       if (granted) {
+        setActive('sensors', 'Sensors granted');
         iosSensorBtn.style.display = 'none';
         const imu = sensors.getLatestIMU();
         if (imu && attitudeEKF) {
           attitudeEKF.initializeFromAccel(imu.accelWithGravity, Date.now());
+          setActive('ekf', 'Initialized from accelerometer');
         }
+      } else {
+        setFailed('sensors', 'User denied sensor permission');
       }
       updateHealthOverlay();
     });
@@ -249,6 +354,27 @@ async function init() {
     // Non-iOS: auto-request
     const granted = await sensors.requestPermission();
     healthState.sensors = granted ? 'granted' : 'denied';
+
+    // Desktop fallback: if no real sensors available, use mock mode
+    if (!granted) {
+      console.log('[Leviathan] Real sensors not available - starting mock mode for desktop testing');
+      sensors.startMockMode();
+      healthState.sensors = 'granted';
+      setDegraded('sensors', 'Using mock sensors (desktop mode)');
+      (window as any).__LEVIATHAN_SIM_MODE__ = true;
+
+      // Initialize EKF from mock sensor data
+      setTimeout(() => {
+        const imu = sensors.getLatestIMU();
+        if (imu && attitudeEKF) {
+          attitudeEKF.initializeFromAccel(imu.accelWithGravity, Date.now());
+          setDegraded('ekf', 'Initialized from mock sensors');
+          console.log('[Leviathan] EKF initialized from mock sensors');
+        }
+      }, 100);
+    } else {
+      setActive('sensors', 'Real sensors active');
+    }
   }
   updateHealthOverlay();
 
@@ -265,8 +391,8 @@ async function init() {
       (pos) => {
         const lat = pos.coords.latitude;
         const lon = pos.coords.longitude;
-        visualCompass.setLocation(lat, lon);
-        blowLocalizer.setObserverPosition({ latitude: lat, longitude: lon, accuracy: pos.coords.accuracy });
+        visualCompass?.setLocation(lat, lon);
+        blowLocalizer?.setObserverPosition({ latitude: lat, longitude: lon, accuracy: pos.coords.accuracy });
         recorder.setObserverPosition(lat, lon);
         console.log(`[Leviathan] GPS: ${lat.toFixed(5)}, ${lon.toFixed(5)} ± ${pos.coords.accuracy?.toFixed(0)}m`);
       },
@@ -279,8 +405,8 @@ async function init() {
       (pos) => {
         const lat = pos.coords.latitude;
         const lon = pos.coords.longitude;
-        visualCompass.setLocation(lat, lon);
-        blowLocalizer.setObserverPosition({ latitude: lat, longitude: lon, accuracy: pos.coords.accuracy });
+        visualCompass?.setLocation(lat, lon);
+        blowLocalizer?.setObserverPosition({ latitude: lat, longitude: lon, accuracy: pos.coords.accuracy });
         recorder.setObserverPosition(lat, lon);
       },
       (err) => console.warn('GPS update failed:', err),
@@ -300,7 +426,7 @@ async function init() {
 
 function resize() {
   renderer.resize(window.innerWidth, window.innerHeight);
-  hudRenderer.resize(window.innerWidth, window.innerHeight);
+  hudRenderer?.resize(window.innerWidth, window.innerHeight);
 }
 
 // ============================================================================
@@ -334,11 +460,13 @@ async function loop() {
   // Process IMU samples for EKF prediction
   if (now - lastEKFUpdateTime >= EKF_MIN_INTERVAL_MS) {
     const imuSamples = sensors.getIMUSamplesSince(lastEKFUpdateTime);
-    attitudeEKF.processSamples(imuSamples);
+    if (attitudeEKF) {
+      attitudeEKF.processSamples(imuSamples);
+    }
 
     // Update heave compensator
     const latestIMU = sensors.getLatestIMU();
-    if (latestIMU) {
+    if (latestIMU && heaveComp) {
       heaveComp.update(latestIMU.accel, now);
     }
 
@@ -358,10 +486,27 @@ async function loop() {
 
     if (result.horizon) {
       currentHorizon = result.horizon;
+      setActive('horizon', `Detected (conf: ${(result.horizon.confidence * 100).toFixed(0)}%)`, result.horizon.confidence);
 
       // Update EKF with horizon measurement
       if (attitudeEKF) {
         attitudeEKF.updateWithHorizon(result.horizon.roll, result.horizon.pitch);
+        const diag = attitudeEKF.getDiagnostics();
+        if (diag.initialized) {
+          const rejRate = (diag.rejectionRate * 100).toFixed(0);
+          setActive('ekf', `Fusing (${rejRate}% rejected)`);
+        }
+      }
+    } else {
+      // Log and report why horizon detection failed
+      const reason = result.failureReason || 'unknown';
+      console.warn('[Horizon] Detection failed:', reason);
+      if (reason.includes('confidence')) {
+        setDegraded('horizon', `Low confidence: ${reason}`);
+      } else if (reason.includes('image data')) {
+        setDegraded('horizon', 'Video not ready');
+      } else {
+        setDegraded('horizon', reason);
       }
     }
 
@@ -379,11 +524,37 @@ async function loop() {
   // ========================================================================
 
   // Try visual compass update
-  visualCompass.updateFromCamera(camera.videoElement, K);
+  if (visualCompass) {
+    visualCompass.updateFromCamera(camera.videoElement, K);
+    // Get fused heading (visual + magnetic)
+    const magneticHeading = sensors.getMagneticHeading();
+    currentHeading = visualCompass.getHeading(magneticHeading);
 
-  // Get fused heading (visual + magnetic)
-  const magneticHeading = sensors.getMagneticHeading();
-  currentHeading = visualCompass.getHeading(magneticHeading);
+    if (currentHeading) {
+      if (currentHeading.source === 'visual_compass') {
+        setActive('heading', `Sun tracking: ${currentHeading.heading.toFixed(0)}°`, currentHeading.confidence);
+      } else if (currentHeading.source === 'fused') {
+        setActive('heading', `Fused: ${currentHeading.heading.toFixed(0)}°`, currentHeading.confidence);
+      } else {
+        setDegraded('heading', `Mag only: ${currentHeading.heading.toFixed(0)}°`, currentHeading.confidence);
+      }
+    }
+  } else {
+    // Fallback to magnetic-only heading
+    const magneticHeading = sensors.getMagneticHeading();
+    if (magneticHeading !== null) {
+      currentHeading = {
+        heading: magneticHeading,
+        source: 'magnetometer',
+        confidence: 0.5,
+        uncertainty: 15
+      };
+      setDegraded('heading', `Mag fallback: ${magneticHeading.toFixed(0)}°`, 0.5);
+    } else {
+      // No heading available at all
+      setDegraded('heading', 'No heading source available');
+    }
+  }
 
   // Update HUD displays
   zoneA.heading.textContent = currentHeading
@@ -409,13 +580,35 @@ async function loop() {
     const best = visibleDetections.sort((a, b) => b.confidence - a.confidence)[0];
 
     // Localize the blow (works at any zoom!)
-    lastBlowLocation = blowLocalizer.localize(
-      best,
-      K,
-      currentHeading,
-      currentOrientation,
-      camera.currentZoom
-    );
+    if (blowLocalizer) {
+      lastBlowLocation = blowLocalizer.localize(
+        best,
+        K,
+        currentHeading,
+        currentOrientation,
+        camera.currentZoom
+      );
+
+      // Update localization status
+      if (lastBlowLocation) {
+        const uncertainty = lastBlowLocation.uncertainty.positionMeters;
+        if (uncertainty < 200) {
+          setActive('localization', `${lastBlowLocation.distance}m @ ${lastBlowLocation.bearing}° (±${uncertainty}m)`);
+        } else {
+          setDegraded('localization', `~${lastBlowLocation.distance}m @ ${lastBlowLocation.bearing}° (±${uncertainty}m)`);
+        }
+      } else if (!currentHeading) {
+        setDegraded('localization', 'Blocked: no heading data');
+      } else {
+        setDegraded('localization', 'Detection but localize failed');
+      }
+    }
+
+    // Start video clip recording on first detection
+    if (appState.state === AppState.DETECTING && !clipRecorder.getLatestClip()?.id?.includes(String(now).slice(0, -4))) {
+      const eventId = lastBlowLocation?.eventId || `BLOW-${Date.now().toString(16).toUpperCase()}`;
+      clipRecorder.startClip(eventId, best.confidence);
+    }
 
     if (isRecording && now - lastRecTime > 2000) {
       const dist = distanceEst.estimate(best);
@@ -437,6 +630,9 @@ async function loop() {
   } else {
     if (appState.state === AppState.DETECTING) {
       appState.state = AppState.READY;
+
+      // Stop clip recording when detection ends
+      clipRecorder.stopClip();
     }
     lastBlowLocation = null;
   }
@@ -445,21 +641,24 @@ async function loop() {
   // RENDERING
   // ========================================================================
 
-  // Draw detection boxes
-  renderer.draw(visibleDetections);
+  // Priority 4: Draw HUD first, then detection boxes on top
+  // (HUD clears canvas, so detection boxes must come after)
+  if (hudRenderer) {
+    hudRenderer.render(
+      currentOrientation,
+      currentHeading,
+      currentHorizon,
+      currentAttitudeState ?? undefined
+    );
+  }
 
-  // Draw Leviathan HUD overlay
-  hudRenderer.render(
-    currentOrientation,
-    currentHeading,
-    currentHorizon,
-    currentAttitudeState ?? undefined
-  );
+  // Draw detection boxes on top of HUD
+  renderer.draw(visibleDetections);
 
   // Debug overlay
   if (debugOverlay.classList.contains('visible')) {
     const lastEvents = recorder.getRecentEvents();
-    const ekfDiag = attitudeEKF.getDiagnostics();
+    const ekfDiag = attitudeEKF?.getDiagnostics();
     const stats = {
       state: appState.state,
       heading: currentHeading?.heading.toFixed(1),
@@ -467,8 +666,8 @@ async function loop() {
       pitch: currentOrientation ? (currentOrientation.pitch * 180 / Math.PI).toFixed(1) : null,
       roll: currentOrientation ? (currentOrientation.roll * 180 / Math.PI).toFixed(1) : null,
       horizonConf: currentHorizon?.confidence.toFixed(2),
-      heave: heaveComp.getInstantaneousHeight().toFixed(2),
-      ekfReject: (ekfDiag.rejectionRate * 100).toFixed(1) + '%',
+      heave: heaveComp?.getInstantaneousHeight().toFixed(2) ?? 'N/A',
+      ekfReject: ekfDiag ? (ekfDiag.rejectionRate * 100).toFixed(1) + '%' : 'N/A',
       imuRate: sensors.getSampleRate().toFixed(0) + 'Hz',
       zoom: camera.currentZoom,
       events: recorder.events.length,

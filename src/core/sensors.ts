@@ -31,6 +31,10 @@ export class SensorManager {
     available: boolean = false;
     permissionGranted: boolean = false;
 
+    // Mock mode for desktop testing
+    useMock: boolean = false;
+    private mockInterval: number | null = null;
+
     // High-frequency IMU buffer (ring buffer)
     private imuBuffer: IMUSample[] = [];
     private imuBufferIndex: number = 0;
@@ -45,6 +49,79 @@ export class SensorManager {
     constructor() {
         this.handleOrientation = this.handleOrientation.bind(this);
         this.handleMotion = this.handleMotion.bind(this);
+    }
+
+    /**
+     * Start mock mode - generates synthetic sensor data for desktop testing
+     * Simulates gentle boat motion
+     */
+    startMockMode(): void {
+        this.useMock = true;
+        this.available = true;
+        this.permissionGranted = true;
+
+        let phase = 0;
+        const MOCK_INTERVAL = 16; // ~60Hz
+
+        this.mockInterval = window.setInterval(() => {
+            const now = Date.now();
+            phase += 0.02;
+
+            // Simulate gentle roll/pitch motion (boat on waves)
+            const rollRate = 0.05 * Math.sin(phase * 0.5);       // Slow roll
+            const pitchRate = 0.03 * Math.cos(phase * 0.7);     // Slow pitch
+            const yawRate = 0.01 * Math.sin(phase * 0.3);       // Very slow yaw drift
+
+            // Simulated gravity with slight tilt
+            const roll = 5 * Math.sin(phase * 0.5) * (Math.PI / 180);  // ±5° roll
+            const pitch = 3 * Math.cos(phase * 0.7) * (Math.PI / 180); // ±3° pitch
+
+            const g = 9.81;
+            const gx = g * Math.sin(roll);
+            const gy = -g * Math.sin(pitch) * Math.cos(roll);
+            const gz = g * Math.cos(pitch) * Math.cos(roll);
+
+            const sample: IMUSample = {
+                timestamp: now,
+                gyro: { x: rollRate, y: pitchRate, z: yawRate },
+                accel: { x: 0, y: 0, z: 0 },
+                accelWithGravity: { x: gx, y: gy, z: gz },
+            };
+
+            // Store in buffer
+            if (this.imuBuffer.length < IMU_BUFFER_SIZE) {
+                this.imuBuffer.push(sample);
+            } else {
+                this.imuBuffer[this.imuBufferIndex] = sample;
+                this.imuBufferIndex = (this.imuBufferIndex + 1) % IMU_BUFFER_SIZE;
+            }
+            this.latestIMU = sample;
+
+            // Update orientation (simulate compass heading drifting)
+            this.orientation = {
+                alpha: (180 + 30 * Math.sin(phase * 0.1)) % 360, // ~South heading, slow drift
+                beta: pitch * 180 / Math.PI,
+                gamma: roll * 180 / Math.PI,
+                absolute: true,
+            };
+
+            this.sampleInterval = MOCK_INTERVAL;
+
+        }, MOCK_INTERVAL);
+
+        console.log('[SensorManager] Mock mode started - simulating boat motion');
+    }
+
+    /**
+     * Stop mock mode
+     */
+    stopMockMode(): void {
+        if (this.mockInterval !== null) {
+            window.clearInterval(this.mockInterval);
+            this.mockInterval = null;
+        }
+        this.useMock = false;
+        console.log('[SensorManager] Mock mode stopped');
     }
 
     async requestPermission(): Promise<boolean> {
